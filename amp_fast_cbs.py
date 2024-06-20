@@ -75,7 +75,7 @@ class FastCBS:
 
         candidate_diffs1 = diffs1.loc[candidate_s:candidate_e]
         candidate_valid1 = {e0: candidate_diffs1[candidate_diffs1 > diff_thr],
-                           e1: candidate_diffs1[candidate_diffs1 < -1 * diff_thr]}
+                            e1: candidate_diffs1[candidate_diffs1 < -1 * diff_thr]}
         candidate_diffs2 = diffs2.loc[candidate_s:candidate_e]
         candidate_valid2 = {e0: candidate_diffs2[candidate_diffs2 > diff_thr],
                             e1: candidate_diffs2[candidate_diffs2 < -1 * diff_thr]}
@@ -153,6 +153,7 @@ class FastCBS:
 
 
 if __name__ == '__main__':
+    region_thr = {"Loss": 0.64, "Gain": 1.34}
     pos_data = pd.read_csv('./amplicon_depth_read_data.tsv', sep='\t', low_memory=False)
     for sample_gene in pos_data[['Sample_Name', 'Gene']].drop_duplicates().values.tolist():
 
@@ -161,6 +162,18 @@ if __name__ == '__main__':
         for depth_type in ['Ref_Norm_Depth']:
             t1 = time.time()
             depth_segments = FastCBS(sample_gene_data[depth_type]).run()
+            if len(depth_segments) > 1:
+                for segment_index, depth_segment in enumerate(depth_segments):
+                    pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment'] = segment_index
+                    segment_depth_mean = pos_data.loc[depth_segment[0]:depth_segment[1], depth_type].mean()
+                    pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Mean'] = segment_depth_mean
+                    if segment_depth_mean < region_thr['Loss']:
+                        pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Type'] = 'Loss'
+                    if segment_depth_mean > region_thr['Gain']:
+                        pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Type'] = 'Gain'
+            else:
+                pos_data.loc[sample_gene_data.index, depth_type + '_Segment'] = 0
+
             t2 = time.time()
             cost_time = t2 - t1
             print(sample_gene, depth_type, 'Run time: {}s'.format(cost_time))
