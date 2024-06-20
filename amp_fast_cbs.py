@@ -51,13 +51,13 @@ class FastCBS:
     def cbs(self, cbs_data, start, end, fix_width=3, diff_thr=0.3, diff_fold=2):
         # check_index = list(range(start, end))
         select_data = cbs_data.loc[start:end]
-        x0 = select_data - select_data.mean()
-        sums = x0.cumsum().shift(1)
-        diffs1 = x0.diff()
-        diffs2 = x0.diff(periods=2).shift(-1)
+        offset_data = select_data - select_data.mean()
+        sums = offset_data.cumsum().shift(1)
+        diffs1 = offset_data.diff()
+        diffs2 = offset_data.diff(periods=2).shift(-1)
         trans_data = pd.concat([diffs1, diffs2], axis=1, sort=False)
         trans_data.columns = ['Xbar_Diff1', 'Xbar_Diff2']
-        trans_data['Xbar_Diff'] = trans_data[['Xbar_Diff1', 'Xbar_Diff2']].agg(lambda row: self.min_diff(row), axis=1)
+        trans_data['Xbar_Diff'] = trans_data[['Xbar_Diff1', 'Xbar_Diff2']].agg(lambda x: self.min_diff(x), axis=1)
         diffs = trans_data['Xbar_Diff']
         sums_fix = sums - diff_fold * diffs
         e0, e1 = sums_fix.idxmin(), sums_fix.idxmax()
@@ -95,7 +95,7 @@ class FastCBS:
             pair_point = candidate_pair[false_point]
             if not candidate_valid2[false_point].empty:
                 breakpoint_candidates.append((pair_point, candidate_valid2[false_point].index.min()))
-            if abs(1 - x.loc[start:pair_point - 1].mean()) > abs(1 - x.loc[pair_point + 1:end].mean()):
+            if abs(1 - select_data.loc[start:pair_point - 1].mean()) > abs(1 - select_data.loc[pair_point + 1:end].mean()):
                 breakpoint_candidates.append((pair_point, start))
             else:
                 breakpoint_candidates.append((pair_point, end))
@@ -111,8 +111,8 @@ class FastCBS:
                     se_candidate = end
                 if se_candidate != end:
                     se_candidate -= 1
-                xt = x0.loc[ss_candidate:se_candidate]
-                xn = x0.drop(xt.index)
+                xt = offset_data.loc[ss_candidate:se_candidate]
+                xn = offset_data.drop(xt.index)
 
                 if (len(xt) > 1) and (len(xn) > 1):
                     test_stat, test_p = self.t_test(xt, xn)
