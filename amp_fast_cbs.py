@@ -11,11 +11,11 @@ pd.set_option("display.max_columns", None)
 
 
 class FastCBS:
-    def __init__(self, input_data, p_thr=0.01, sig_diff_stop=True, jump_thr=0.3, diff_fold=3, fix_width=2):
+    def __init__(self, input_data, p_thr=0.01, sig_diff_stop=True, jump_thr=0.3, diff_fold=3, extreme_number=3):
         self.input_data = input_data
         self.p_thr = p_thr
         self.sig_diff_stop = sig_diff_stop
-        self.fix_width = fix_width
+        self.extreme_number = extreme_number
         self.jump_thr = jump_thr
         self.diff_fold = diff_fold
         self.min_index = min(self.input_data.index)
@@ -61,91 +61,77 @@ class FastCBS:
         trans_data['Offset_Diff1'] = trans_data['Values_Offset'].diff()
         trans_data['Offset_Diff2'] = trans_data['Values_Offset'].diff(periods=2).shift(-1)
         trans_data[['Offset_Diff_Min', 'Offset_Diff_Max']] = trans_data[['Offset_Diff1', 'Offset_Diff2']].agg(
-            lambda x: diff_extremal(x), axis=1, result_type='expand')
+            lambda x: self.diff_extremal(x), axis=1, result_type='expand')
         trans_data['Offset_Sum_Fix'] = trans_data['Offset_Sum'] - self.diff_fold * trans_data['Offset_Diff_Min']
         # print(diffs, sums_fix)
 
-        bp0, bp1 = trans_data['Offset_Sum_Fix'].idxmin(), trans_data['Offset_Sum_Fix'].idxmax()
+        jump_thr_candidates = dict()
 
-        bp_start, bp_end = min(bp0, bp1), max(bp0, bp1)
-        print(bp0, bp1)
-
-        candidate_pair = {bp0: bp1, bp1: bp0}
-
-        jump_candidates = dict()
-
-        for bp_pos in [bp0, bp1]:
-            jump_candidates[bp_pos] = dict()
-            if bp_pos - self.fix_width > start:
-                jump_candidates[bp_pos]['Start'] = bp_pos - self.fix_width
+        up_candidate_min_pos = trans_data[trans_data['Offset_Diff_Min'] > self.jump_thr]
+        if not up_candidate_min_pos.empty:
+            jump_thr_candidates['Up'] = up_candidate_min_pos['Offset_Sum_Fix'].nsmallest(
+                self.extreme_number).index.tolist()
+        else:
+            up_candidate_max_pos = trans_data[trans_data['Offset_Diff_Max'] > self.jump_thr]
+            if not up_candidate_max_pos.empty:
+                jump_thr_candidates['Up'] = up_candidate_max_pos['Offset_Sum_Fix'].nsmallest(
+                    self.extreme_number).index.tolist()
             else:
-                jump_candidates[bp_pos]['Start'] = start
-            if bp_pos + self.fix_width < end:
-                jump_candidates[bp_pos]['End'] = bp_pos + self.fix_width
+                jump_thr_candidates['Up'] = list()
+
+        down_candidate_min_pos = trans_data[trans_data['Offset_Diff_Min'] < -1 * self.jump_thr]
+        if not down_candidate_min_pos.empty:
+            jump_thr_candidates['Down'] = down_candidate_min_pos['Offset_Sum_Fix'].nlargest(
+                self.extreme_number).index.tolist()
+        else:
+            down_candidate_max_pos = trans_data[trans_data['Offset_Diff_Max'] < -1 * self.jump_thr]
+            if not down_candidate_max_pos.empty:
+                jump_thr_candidates['Down'] = down_candidate_max_pos['Offset_Sum_Fix'].nlargest(
+                    self.extreme_number).index.tolist()
             else:
-                jump_candidates[bp_pos]['End'] = end
+                jump_thr_candidates['Down'] = list()
 
-        min_diffs_max = trans_data['Offset_Diff_Max'].loc[jump_candidates[bp0]['Start']:jump_candidates[bp0]['End']]
-        max_diffs_max = trans_data['Offset_Diff_Max'].loc[jump_candidates[bp1]['Start']:jump_candidates[bp1]['End']]
-        jump_valid_max = {bp0: min_diffs_max[min_diffs_max > self.jump_thr],
-                          bp1: max_diffs_max[max_diffs_max < -1 * self.jump_thr]}
-        candidate_diffs_min = trans_data['Offset_Diff_Min']
-        jump_valid_min = {bp0: candidate_diffs_min[candidate_diffs_min > self.jump_thr],
-                          bp1: candidate_diffs_min[candidate_diffs_min < -1 * self.jump_thr]}
-
-        break_checks = {bp0: True, bp1: True}
-        for break_end in break_checks:
-            # print(break_end, jump_valid_max[break_end])
-            if jump_valid_max[break_end].empty and (break_end != start) and (break_end != end):
-                break_checks[break_end] = False
-
-        break_scores = sum(break_checks.values())
+        pair_type = {'Up': 'Down', 'Down': 'Up'}
         breakpoint_candidates = list()
-        if break_scores == 2:
-            jump_bp_s, jump_bp_end = min(bp0, bp1), max(bp0, bp1)
-            breakpoint_candidates.append((jump_bp_s, jump_bp_end, 'Sum_Fix'))
-            if (jump_bp_s - start < 2) and ((start, jump_bp_end, 'Sum_Fix') not in breakpoint_candidates):
-                breakpoint_candidates.append((start, jump_bp_end, 'Sum_Fix'))
-            if (end - jump_bp_end) < 2 and ((jump_bp_s, end, 'Sum_Fix') not in breakpoint_candidates):
-                breakpoint_candidates.append((jump_bp_s, end, 'Sum_Fix'))
-        elif break_scores == 1:
-            # print(break_checks)
-            false_bp = [key for key in break_checks if not break_checks[key]][0]
-            pair_bp = candidate_pair[false_bp]
-            jump_bps = {'Jump_Max': jump_valid_max[false_bp], 'Jump_Min': jump_valid_min[false_bp]}
-            for jump_type in jump_bps:
-                if not jump_bps[jump_type].empty:
-                    for jump_bp_index in jump_bps[jump_type].index:
-                        jump_bp_s, jump_bp_end = min(pair_bp, jump_bp_index), max(pair_bp, jump_bp_index)
-                        if (jump_bp_s, jump_bp_end, jump_type) not in breakpoint_candidates:
-                            breakpoint_candidates.append((jump_bp_s, jump_bp_end, jump_type))
-                        if (jump_bp_s - start < 2) and ((start, jump_bp_end, jump_type) not in breakpoint_candidates):
-                            breakpoint_candidates.append((start, jump_bp_end, jump_type))
-                        if (end - jump_bp_end) < 2 and ((jump_bp_s, end, jump_type) not in breakpoint_candidates):
-                            breakpoint_candidates.append((jump_bp_s, end, jump_type))
-            if abs(select_data.loc[start:pair_bp - 1].mean() - 1) > abs(
-                    select_data.loc[pair_bp + 1:end].mean() - 1):
-                breakpoint_candidates.append((start, pair_bp, 'Endpoint'))
-            else:
-                breakpoint_candidates.append((pair_bp, end, 'Endpoint'))
-        print(break_checks, breakpoint_candidates)
+        for break_type in jump_thr_candidates:
+            if jump_thr_candidates[break_type]:
+                for break_end in jump_thr_candidates[break_type]:
+                    if jump_thr_candidates[pair_type[break_type]]:
+                        for pair_end in jump_thr_candidates[pair_type[break_type]]:
+                            jump_bp_s, jump_bp_end = min(break_end, pair_end), max(break_end, pair_end)
+                            if (jump_bp_s, jump_bp_end, 'Sum_Fix') not in breakpoint_candidates:
+                                breakpoint_candidates.append((jump_bp_s, jump_bp_end, 'Sum_Fix'))
+                            if (jump_bp_s - start < 2) and (
+                                    (start, jump_bp_end, 'Sum_Fix') not in breakpoint_candidates):
+                                breakpoint_candidates.append((start, jump_bp_end, 'Sum_Fix'))
+                            if (end - jump_bp_end) < 2 and ((jump_bp_s, end, 'Sum_Fix') not in breakpoint_candidates):
+                                breakpoint_candidates.append((jump_bp_s, end, 'Sum_Fix'))
+                    else:
+                        if abs(select_data.loc[start:break_end].mean() - 1) > abs(
+                                select_data.loc[break_end:end].mean() - 1):
+                            breakpoint_candidates.append((start, break_end, 'Endpoint'))
+                        else:
+                            breakpoint_candidates.append((break_end, end, 'Endpoint'))
+
         if breakpoint_candidates:
             breakpoint_p = dict()
             for breakpoint_candidate in breakpoint_candidates:
                 candidate_bp_s, candidate_bp_e, candidate_bp_type = breakpoint_candidate
+
                 if candidate_bp_e != end:
                     candidate_bp_e -= 1
                 # if candidate_bp_s - start < 2:
                 #     candidate_bp_s = start
                 # if end - se_candidate < 2:
                 #     se_candidate = end
-                print(candidate_bp_s, candidate_bp_e, candidate_bp_type)
+                # print(candidate_bp_s, candidate_bp_e, candidate_bp_type)
 
                 xt = trans_data['Values_Offset'].loc[candidate_bp_s:candidate_bp_e]
                 xn = trans_data['Values_Offset'].drop(xt.index)
                 if (len(xt) > 1) and (len(xn) > 1):
                     test_stat, test_p = self.t_test(xt, xn)
                     breakpoint_p[(candidate_bp_s, candidate_bp_e, candidate_bp_type)] = test_p
+
             if breakpoint_p:
                 print(breakpoint_p)
                 best_p = min(breakpoint_p.values())
@@ -155,11 +141,9 @@ class FastCBS:
                 else:
                     return False, best_p, best_bp_s, best_bp_e, best_bp_type
             else:
-                return False, 1, bp_start, bp_end, 'Sum_Fix'
+                return False, 1, start, end, 'Sum_Fix'
         else:
-            if bp_end != end:
-                bp_end -= 1
-            return False, 1, bp_start, bp_end, 'Sum_Fix'
+            return False, 1, start, end, 'Sum_Fix'
 
     @staticmethod
     def t_test(a_data, b_data, sd_thr=0.05):
@@ -171,15 +155,15 @@ class FastCBS:
         ttest_stat, ttest_p = ttest_ind(a_data, b_data, equal_var=equal_val_bool)
         return ttest_stat, ttest_p
 
-
-def diff_extremal(row):
-    if row.isnull().values.any():
-        return [np.nan, np.nan]
-    else:
-        min_row_idx = row.abs().idxmin()
-        max_row_idx = row.abs().idxmax()
-        # print(row, min_row_idx)
-        return [row[min_row_idx], row[max_row_idx]]
+    @staticmethod
+    def diff_extremal(row):
+        if row.isnull().values.any():
+            return [np.nan, np.nan]
+        else:
+            min_row_idx = row.abs().idxmin()
+            max_row_idx = row.abs().idxmax()
+            # print(row, min_row_idx)
+            return [row[min_row_idx], row[max_row_idx]]
 
 
 if __name__ == '__main__':
