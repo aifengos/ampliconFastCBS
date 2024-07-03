@@ -4,7 +4,7 @@
 import numpy as np
 import pandas as pd
 import time
-from scipy.stats import ttest_ind, levene
+from scipy.stats import ttest_ind, ttest_1samp, levene
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
