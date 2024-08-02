@@ -270,7 +270,8 @@ class FastCBS:
             return [row[min_row_idx], row[max_row_idx]]
 
 
-def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_amp_ratio=0.33, gene_multiple_cnv=2):
+def cbs_call(sample_data, call_depth_col, amp_thr, region_thr, cnv_amps_thr, call_mode='Germline',
+             unstable_amp_ratio=0.33, gene_multiple_cnv=2):
     # Amplicon Call
     sample_data[['Amp_States', 'Region_States', 'Region_Gene_Str', 'Stable_Region_States',
                  'Unstable_Region_States', 'Region_Ratio', 'Region_Ratio_Std', 'Region_States_Amps', 'Region_Amps',
@@ -282,7 +283,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
         sample_data.loc[(sample_data['Amp_Type'] == amp_type) &
                         (sample_data[call_depth_col] > amp_thr[amp_type]['Gain']), [
             'Amp_States']] = 'Gain'
-        if self.call_mode == 'Germline':
+        if call_mode == 'Germline':
             sample_data.loc[(sample_data['Amp_Type'] == amp_type) &
                             (sample_data[call_depth_col] < amp_thr[amp_type]['Loss']), [
                 'Amp_States']] = 'Loss'
@@ -292,22 +293,23 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
     for sample_gene in sample_data[['Sample_Name', 'Gene']].drop_duplicates().values.tolist():
         sample_gene_data = sample_data[(sample_data['Sample_Name'] == sample_gene[0]) &
                                        (sample_data['Gene'] == sample_gene[1])]
-        gene_ratio, gene_ratio_std = self.calc_mean_std(sample_gene_data[call_depth_col])
+        gene_ratio, gene_ratio_std = calc_mean_std(sample_gene_data[call_depth_col])
         sample_data.loc[sample_gene_data.index, 'Gene_Ratio'] = gene_ratio
         sample_data.loc[sample_gene_data.index, 'Gene_Ratio_Std'] = gene_ratio_std
         # cbs_depth_segments = FastCBS(sample_gene_data[call_depth_col], 0.05, 0.01, False, 0.3, 3, 3,
         #                              gene_multiple_cnv, sample_gene).run()
-        cbs_depth_segments = FastCBS(sample_gene_data[call_depth_col], 0.05, 0.01, False, 0.25, 3, 3,
+        cbs_depth_segments = FastCBS(sample_gene_data[call_depth_col], 0.05, 0.01, False, 0.3, 3, 3,
                                      gene_multiple_cnv, sample_gene).run()
         # if sample_gene[1] == 'ERBB2':
         #     print(sample_gene, cbs_depth_segments)
+        # Fix miss split amps at boundary
         split_segments = list()
         for segment_index, cbs_depth_segment in enumerate(cbs_depth_segments):
             segment_start, segment_end = cbs_depth_segment
             segment_data = sample_gene_data.loc[segment_start:segment_end]
-            segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = self.segment_cnv_check(
+            segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = segment_cnv_check(
                 segment_data, call_depth_col, unstable_amp_ratio, region_thr)
-            if self.call_mode == 'Germline':
+            if call_mode == 'Germline':
                 segment_states = segment_cnv_type[segment_stability]
                 if (segment_states == 'Negative') and (segment_type_amp_ratio < 0.5):
                     segment_type_miss_amps = segment_data[segment_data['Amp_States'].isin(['Negative'])]
@@ -330,7 +332,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
                             if fix_board:
                                 # print(segment_start, segment_end)
                                 segment_data = sample_gene_data.loc[segment_start:segment_end]
-                                segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = self.segment_cnv_check(
+                                segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = segment_cnv_check(
                                     segment_data, call_depth_col, unstable_amp_ratio, region_thr)
             sample_data.loc[segment_data.index, 'Region_Index_Raw'] = segment_index
             sample_data.loc[segment_data.index, 'Region_Type'] = segment_stability
@@ -343,7 +345,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
             for segment_index, split_segment in enumerate(split_segments):
                 segment_start, segment_end = split_segment
                 segment_data = sample_gene_data.loc[segment_start:segment_end]
-                segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = self.segment_cnv_check(
+                segment_cnv_type, segment_stability, segment_type_amp_ratio, segment_ratio, segment_ratio_std = segment_cnv_check(
                     segment_data, call_depth_col, unstable_amp_ratio, region_thr)
                 sample_data.loc[segment_data.index, 'Region_Index_Raw'] = 1000 + segment_index
                 sample_data.loc[segment_data.index, 'Region_Type'] = segment_stability
@@ -358,7 +360,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
                 keep_segments = {item: index for index, item in enumerate(keep_segments)}
                 sample_data.loc[sample_gene_data.index, 'Region_Index_Raw'] = sample_data.loc[
                     sample_gene_data.index, 'Region_Index_Raw'].replace(keep_segments)
-
+        # Merge consecutive intervals of the same CNV state
         sample_gene_data = sample_data[(sample_data['Sample_Name'] == sample_gene[0]) &
                                        (sample_data['Gene'] == sample_gene[1])]
         for cnv_type in sample_gene_data['Region_States'].drop_duplicates().values.tolist():
@@ -369,7 +371,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
                 for segments_group in type_segments_groups:
                     if len(segments_group) > 1:
                         segment_group_data = sample_gene_data[sample_gene_data['Region_Index_Raw'].isin(segments_group)]
-                        group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
+                        group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = segment_cnv_check(
                             segment_group_data, call_depth_col, unstable_amp_ratio, region_thr)
                         group_cnv_type = group_cnv[group_stability]
                         if group_cnv_type == cnv_type:
@@ -390,6 +392,8 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
             keep_segments = {item: index for index, item in enumerate(keep_segments)}
             sample_data.loc[sample_gene_data.index, 'Region_Index'] = sample_data.loc[
                 sample_gene_data.index, 'Region_Index'].replace(keep_segments)
+
+            # Merge consecutive intervals with the same positive CNV state
             # if sample_gene[1] == 'MET':
             #     print(keep_segments, '\n', sample_data.loc[sample_gene_data.index][['Region_Index', 'Region_Index_Raw']])
             sample_gene_data = sample_data[(sample_data['Sample_Name'] == sample_gene[0]) &
@@ -404,7 +408,7 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
                         if (segment_index_max - seg_index_min + 1) > len(segments_group):
                             segment_group_data = sample_gene_data[sample_gene_data['Region_Index'].between(
                                 seg_index_min, segment_index_max, inclusive='both')]
-                            group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
+                            group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = segment_cnv_check(
                                 segment_group_data, call_depth_col, unstable_amp_ratio, region_thr)
                             other_type_mean = sample_gene_data[sample_gene_data['Region_States'] != cnv_type][
                                 call_depth_col].mean()
@@ -420,7 +424,6 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
                                     sample_data.loc[segment_group_data.index, 'Unstable_Region_States'] = group_cnv[
                                         'Unstable']
                                     sample_data.loc[segment_group_data.index, 'Region_States'] = group_cnv_type
-
         keep_segments = sorted(
             sample_data.loc[sample_gene_data.index]['Region_Index'].drop_duplicates().values.tolist())
         if keep_segments:
@@ -436,48 +439,79 @@ def cbs_call(self, sample_data, call_depth_col, amp_thr, region_thr, unstable_am
             segment_data = sample_gene_data[sample_gene_data['Region_Index'] == segment_index]
             if cnv_type in ['Loss', 'Gain']:
                 region_amps = segment_data.shape[0]
-                region_cnv_amps = segment_data[segment_data['Amp_States'] == cnv_type].shape[0]
-                sample_data.loc[segment_data.index, 'Region_States_Amps'] = region_cnv_amps
-                sample_data.loc[segment_data.index, 'Region_Amps'] = region_amps
-                type_amp_ratio = region_cnv_amps / region_amps
-                sample_data.loc[segment_data.index, 'Region_States_Amp_ratio'] = type_amp_ratio
+                if region_amps >= cnv_amps_thr[cnv_type]:
+                    region_cnv_amps = segment_data[segment_data['Amp_States'] == cnv_type].shape[0]
+                    sample_data.loc[segment_data.index, 'Region_States_Amps'] = region_cnv_amps
+                    sample_data.loc[segment_data.index, 'Region_Amps'] = region_amps
+                    type_amp_ratio = region_cnv_amps / region_amps
+                    sample_data.loc[segment_data.index, 'Region_States_Amp_ratio'] = type_amp_ratio
 
-                max_exon_num = segment_data['Exon_Str_End'].max()
-                min_exon_num = segment_data['Exon_Str_Start'].min()
-                if max_exon_num == min_exon_num:
-                    exon_region_str = str(min_exon_num)
+                    max_exon_num = segment_data['Exon_Str_End'].max()
+                    min_exon_num = segment_data['Exon_Str_Start'].min()
+                    if max_exon_num == min_exon_num:
+                        exon_region_str = str(min_exon_num)
+                    else:
+                        exon_region_str = str(min_exon_num) + '-' + str(max_exon_num)
+                    cnv_exon_count = max_exon_num - min_exon_num + 1
+                    if call_mode == 'Germline':
+                        cnv_region_str = sample_gene[1] + '_E' + exon_region_str
+                        next_exon_order = segment_data['Exon_Order'].max() + 1
+                        prev_exon_order = segment_data['Exon_Order'].min() - 1
+                        # region_adjacent_data = sample_gene_data.loc[sample_gene_data['Exon_Order'].isin(
+                        #     [prev_exon_order, next_exon_order])]
+                        region_adjacent_data = sample_gene_data.loc[
+                            sample_gene_data['Exon_Order'].between(prev_exon_order, next_exon_order,
+                                                                   inclusive='both') & ~sample_gene_data.index.isin(
+                                segment_data.index)]
+                        sample_data.loc[segment_data.index, 'Region_Exon_Count'] = cnv_exon_count
+                    else:
+                        cnv_region_str = sample_gene[1]
+                        region_adjacent_data = pd.DataFrame()
+                    sample_data.loc[segment_data.index, 'Region_Gene_Str'] = cnv_region_str
+                    region_start_loc = segment_data['Scan_Start'].min()
+                    region_end_loc = segment_data['Scan_End'].max()
+                    region_length = region_end_loc - region_start_loc
+                    amp_region = str(region_start_loc) + '-' + str(region_end_loc)
+                    chr_str = '-'.join(segment_data['Chr'].drop_duplicates().values.tolist())
+                    sample_data.loc[segment_data.index, 'Region_Loc'] = chr_str + ':' + amp_region
+                    sample_data.loc[segment_data.index, 'Region_Length'] = region_length
+                    segment_region_ratio = segment_data[call_depth_col].mean()
+                    if not region_adjacent_data.empty:
+                        adjacent_ratio_gap = abs(
+                            region_adjacent_data[call_depth_col].mean() - segment_region_ratio)
+                    else:
+                        adjacent_ratio_gap = 0.5
+                    sample_data.loc[segment_data.index, 'Adjacent_Ratio_Gap'] = adjacent_ratio_gap
                 else:
-                    exon_region_str = str(min_exon_num) + '-' + str(max_exon_num)
-                cnv_exon_count = max_exon_num - min_exon_num + 1
-                if self.call_mode == 'Germline':
-                    cnv_region_str = sample_gene[1] + '_E' + exon_region_str
-                    next_exon_order = segment_data['Exon_Order'].max() + 1
-                    prev_exon_order = segment_data['Exon_Order'].min() - 1
-                    # region_adjacent_data = sample_gene_data.loc[sample_gene_data['Exon_Order'].isin(
-                    #     [prev_exon_order, next_exon_order])]
-                    region_adjacent_data = sample_gene_data.loc[
-                        sample_gene_data['Exon_Order'].between(prev_exon_order, next_exon_order,
-                                                               inclusive='both') & ~sample_gene_data.index.isin(
-                            segment_data.index)]
-                    sample_data.loc[segment_data.index, 'Region_Exon_Count'] = cnv_exon_count
-                else:
-                    cnv_region_str = sample_gene[1]
-                    region_adjacent_data = pd.DataFrame()
-                sample_data.loc[segment_data.index, 'Region_Gene_Str'] = cnv_region_str
-                region_start_loc = segment_data['Scan_Start'].min()
-                region_end_loc = segment_data['Scan_End'].max()
-                region_length = region_end_loc - region_start_loc
-                amp_region = str(region_start_loc) + '-' + str(region_end_loc)
-                chr_str = '-'.join(segment_data['Chr'].drop_duplicates().values.tolist())
-                sample_data.loc[segment_data.index, 'Region_Loc'] = chr_str + ':' + amp_region
-                sample_data.loc[segment_data.index, 'Region_Length'] = region_length
-                segment_region_ratio = segment_data[call_depth_col].mean()
-                if not region_adjacent_data.empty:
-                    adjacent_ratio_gap = abs(
-                        region_adjacent_data[call_depth_col].mean() - segment_region_ratio)
-                else:
-                    adjacent_ratio_gap = 0.5
-                sample_data.loc[segment_data.index, 'Adjacent_Ratio_Gap'] = adjacent_ratio_gap
+                    sample_data.loc[segment_data.index, 'Region_States'] = 'Negative'
+
+        sample_gene_data = sample_data[(sample_data['Sample_Name'] == sample_gene[0]) &
+                                       (sample_data['Gene'] == sample_gene[1])]
+        negative_segments = sample_gene_data[sample_gene_data['Region_States'] == 'Negative'][
+            'Region_Index'].drop_duplicates().values.tolist()
+        if negative_segments:
+            neg_segments_groups = int_continuous_split(negative_segments, 1)
+            for neg_segments_group in neg_segments_groups:
+                if len(neg_segments_group) > 1:
+                    seg_index_min, segment_index_max = min(neg_segments_group), max(neg_segments_group)
+                    segment_group_data = sample_gene_data[sample_gene_data['Region_Index'].between(
+                        seg_index_min, segment_index_max, inclusive='both')]
+                    group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = segment_cnv_check(
+                        segment_group_data, call_depth_col, unstable_amp_ratio, region_thr)
+                    sample_data.loc[segment_group_data.index, 'Region_Index'] = min(neg_segments_group)
+                    sample_data.loc[segment_group_data.index, 'Region_Type'] = group_stability
+                    sample_data.loc[segment_group_data.index, 'Region_Ratio'] = group_ratio
+                    sample_data.loc[segment_group_data.index, 'Region_Ratio_Std'] = group_ratio_std
+                    sample_data.loc[segment_group_data.index, 'Stable_Region_States'] = 'Negative'
+                    sample_data.loc[segment_group_data.index, 'Unstable_Region_States'] = 'Negative'
+        keep_segments = sorted(
+            sample_data.loc[sample_gene_data.index]['Region_Index'].drop_duplicates().values.tolist())
+        if keep_segments:
+            keep_segments = {item: index for index, item in enumerate(keep_segments)}
+            # if sample_gene[1] == 'MET':
+            #     print(keep_segments)
+            sample_data.loc[sample_gene_data.index, 'Region_Index'] = sample_data.loc[
+                sample_gene_data.index, 'Region_Index'].replace(keep_segments)
 
     return sample_data
 
@@ -538,25 +572,12 @@ def int_continuous_split(int_list, max_gap_value):
 
 if __name__ == '__main__':
     region_thr = {"Loss": 0.64, "Gain": 1.34}
+    amp_thr = {"Loss": 0.64, "Gain": 1.34}
+    cnv_amps_thr = {"Loss": 2, "Gain": 2}
     pos_data = pd.read_csv('./amplicon_depth_read_data.tsv', sep='\t', low_memory=False)
     t1 = time.time()
-    for sample_gene in pos_data[['Sample_Name', 'Gene']].drop_duplicates().values.tolist():
-        sample_gene_data = pos_data[(pos_data['Sample_Name'] == sample_gene[0]) &
-                                    (pos_data['Gene'] == sample_gene[1])]
-        for depth_type in ['Ref_Norm_Depth']:
-            depth_segments = FastCBS(sample_gene_data[depth_type]).run()
-            if len(depth_segments) > 1:
-                for segment_index, depth_segment in enumerate(depth_segments):
-                    pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment'] = segment_index
-                    segment_depth_mean = pos_data.loc[depth_segment[0]:depth_segment[1], depth_type].mean()
-                    pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Mean'] = segment_depth_mean
-                    if segment_depth_mean < region_thr['Loss']:
-                        pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Type'] = 'Loss'
-                    if segment_depth_mean > region_thr['Gain']:
-                        pos_data.loc[depth_segment[0]:depth_segment[1], depth_type + '_Segment_Type'] = 'Gain'
-            else:
-                pos_data.loc[sample_gene_data.index, depth_type + '_Segment'] = 0
-
+    call_col = 'Ref_Norm_Depth'
+    cbs_data = cbs_call(pos_data, call_col, amp_thr, region_thr, cnv_amps_thr)
     t2 = time.time()
     cost_time = t2 - t1
     print('Run time: {}s'.format(cost_time))
