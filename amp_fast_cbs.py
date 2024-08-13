@@ -10,6 +10,7 @@ pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 
 
+# Fast Circular Binary Segmentation
 class FastCBS:
     def __init__(self, input_data, seg_p_thr=0.05, combine_p_thr=0.01, sig_diff_stop=True, jump_thr=0.3, diff_fold=3,
                  extreme_point_num=3, pos_cnv_num=2, sample_gene=''):
@@ -276,7 +277,7 @@ class FastCBS:
 
 
 # Circular binary segmentation with CNV threshold
-def cbs_call(sample_data, call_depth_col, amp_thr, region_thr, cnv_amps_thr, call_mode='Germline',
+def cbs_call(sample_data, cbs_depth_col, amp_thr, region_thr, cnv_amps_thr, call_mode='Germline',
              unstable_amp_ratio=0.33, gene_multiple_cnv=2):
     # Amplicon Call
     sample_data[['Amp_States', 'Region_States', 'Region_Gene_Str', 'Stable_Region_States',
@@ -284,6 +285,12 @@ def cbs_call(sample_data, call_depth_col, amp_thr, region_thr, cnv_amps_thr, cal
                  'Region_States_Amp_ratio', 'Region_Loc', 'Region_Length', 'Region_Exon_Count',
                  'Adjacent_Ratio_Gap', 'Region_Type', 'Region_Index', 'Region_Index_Raw', 'Gene_Ratio',
                  'Gene_Ratio_Std']] = np.nan
+
+    sample_data[cbs_depth_col + '_Raw'] = sample_data[cbs_depth_col].copy()
+    sample_data[cbs_depth_col] = sample_data.groupby(['Sample_Name', 'Gene'])[cbs_depth_col].apply(
+        lambda x: outlier_smooth(x))
+
+    call_depth_col = cbs_depth_col
 
     # Determining the CNV state of amplicon probes
     for amp_type in ['Stable', 'Unstable']:
@@ -362,7 +369,7 @@ def cbs_call(sample_data, call_depth_col, amp_thr, region_thr, cnv_amps_thr, cal
                 sample_data.loc[sample_gene_data.index, 'Region_Index_Raw'] = sample_data.loc[
                     sample_gene_data.index, 'Region_Index_Raw'].replace(keep_segments)
 
-        # Merge consecutive intervals of the same CNV state
+        # Merge the adjacent segments with same CNV State
         sample_gene_data = sample_data[(sample_data['Sample_Name'] == sample_gene[0]) &
                                        (sample_data['Gene'] == sample_gene[1])]
         for cnv_type in sample_gene_data['Region_States'].drop_duplicates().values.tolist():
@@ -513,7 +520,7 @@ def cbs_call(sample_data, call_depth_col, amp_thr, region_thr, cnv_amps_thr, cal
     return sample_data
 
 
-# Detection of CNV properties of segments
+# Determine the CNV state of the segment based on the average probe depth and threshold
 def segment_cnv_check(segment_data, call_depth_col, unstable_amp_ratio, region_thr):
     region_amps = segment_data.shape[0]
     segment_region_ratio, segment_region_ratio_std = calc_mean_std(segment_data[call_depth_col])
@@ -541,6 +548,7 @@ def segment_cnv_check(segment_data, call_depth_col, unstable_amp_ratio, region_t
     return stability_cnv_type, region_stability, type_amp_ratio, segment_region_ratio, segment_region_ratio_std
 
 
+# Calculate the mean and standard deviation of the data
 def calc_mean_std(calc_data):
     data_len = len(calc_data)
     if data_len > 1:
@@ -563,6 +571,31 @@ def int_continuous_split(int_list, max_gap_value):
         pre_num = num_item
     num_groups.append(num_sequence_list)
     return num_groups
+
+
+def outlier_smooth(input_data, window_size=3):
+    smooth_data = input_data.copy()
+    replace_value = dict()
+    for i in smooth_data.index:
+        obs_value = smooth_data.loc[i]
+        obs_data = smooth_data.loc[i-window_size:i+window_size]
+        obs_max = obs_data.max()
+        obs_min = obs_data.min()
+        obs_data_std = obs_data.std()
+        if obs_value == obs_max:
+            second_max_value = obs_data.nlargest(2).iloc[1]
+            closest_value = obs_value - second_max_value
+            if closest_value > 4 * obs_data_std:
+                replace_value[i] = obs_data.median() + 2 * obs_data_std
+        elif obs_value == obs_min:
+            second_min_value = obs_data.nsmallest(2).iloc[1]
+            closest_value = second_min_value - obs_value
+            if closest_value > 4 * obs_data_std:
+                replace_value[i] = obs_data.median() - 2 * obs_data_std
+    if replace_value:
+        for index, value in replace_value.items():
+            smooth_data.loc[index] = value
+    return smooth_data
 
 
 if __name__ == '__main__':
