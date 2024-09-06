@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import time
 import itertools
-from scipy.stats import ttest_ind, ttest_1samp, levene
+from scipy.stats import mannwhitneyu
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
@@ -35,12 +35,14 @@ class FastCBS:
         self.cpf_weight = 0.005
 
     def run(self):
-        samples_data = self.input_data.copy()
+        samples_data = self.input_data.sort_values(by=['Path', 'Amp_Order']).reset_index(
+            drop=True)
+
         samples_data[['Amp_States', 'Region_States', 'Region_Gene_Str', 'Stable_Region_States',
                       'Unstable_Region_States', 'Region_Ratio', 'Region_Ratio_Std', 'Region_States_Amps', 'Region_Amps',
                       'Region_States_Amp_ratio', 'Region_Loc', 'Region_Length', 'Region_Exon_Count',
-                      'Adjacent_Ratio_Gap', 'Region_Type', 'Region_Index', 'Region_Index_Raw', 'Gene_Ratio',
-                      'Gene_Ratio_Std']] = np.nan
+                      'Region_Exon_Amp_Count', 'Adjacent_Ratio_Gap', 'Region_Type', 'Region_Index',
+                      'Region_Index_Raw', 'Gene_Ratio', 'Gene_Ratio_Std']] = np.nan
         samples_data.rename(columns={self.cbs_depth_col: self.cbs_depth_col + '_Raw'}, inplace=True)
         samples_data[self.cbs_depth_col] = samples_data.groupby(['Sample_Name', 'Gene'])[
             self.cbs_depth_col + '_Raw'].apply(lambda x: self.outlier_smooth(x))
@@ -64,10 +66,11 @@ class FastCBS:
             sample_gene_depth_segments = list()
             min_index = sample_gene_cbs_data.first_valid_index()
             max_index = sample_gene_cbs_data.last_valid_index()
-            # print(self.input_data, self.min_index, self.max_index)
-            cbs_depth_segments_values = self.rec_segment(sample_gene_cbs_data, min_index, max_index,
+            cbs_depth_segments_values = self.rec_cbs(sample_gene_cbs_data, min_index, max_index,
                                                          sample_gene_depth_segments, sample_gene)
-            merged_cbs_depth_segments = self.cpf_merge(sample_gene_cbs_data, cbs_depth_segments_values, sample_gene)
+            merged_cbs_depth_segments = self.segment_merge(sample_gene_cbs_data, cbs_depth_segments_values, sample_gene)
+            # if debug_list and (sample_gene in debug_list):
+            #     print(sample_gene, cbs_depth_segments_values, merged_cbs_depth_segments)
             cbs_depth_segments = [(start_index + segment[0], start_index + segment[1]) for segment in
                                   merged_cbs_depth_segments]
             split_segments = list()
@@ -79,7 +82,8 @@ class FastCBS:
                 if self.call_mode == 'Germline':
                     segment_states = segment_cnv_type[segment_stability]
                     # Correct the erroneous boundary division.
-                    if (segment_states == 'Negative') and (segment_type_amp_ratio < 0.5):
+                    if (segment_states in ['Gain', 'Loss']) or (
+                            (segment_states == 'Negative') and (segment_type_amp_ratio < 0.5)):
                         segment_type_miss_amps = segment_data[segment_data['Amp_States'].isin(['Negative'])]
                         if not segment_type_miss_amps.empty:
                             amp_thr_failed = segment_type_miss_amps.index.values.tolist()
@@ -146,19 +150,9 @@ class FastCBS:
                         seg_index_min, segment_index_max = min(segments_group), max(segments_group)
                         segment_group_data = sample_gene_data[sample_gene_data['Region_Index'].between(
                             seg_index_min, segment_index_max, inclusive='both')]
-                        if (segment_index_max - seg_index_min + 1) > len(segments_group):
-                            group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
-                                segment_group_data, call_depth_col)
-                            other_type_mean = sample_gene_data[sample_gene_data['Region_States'] != cnv_type][
-                                call_depth_col].mean()
-                            if (other_type_mean - 1) > 0.8 * (self.region_thr[group_stability][cnv_type] - 1):
-                                group_cnv_type = group_cnv[group_stability]
-                            else:
-                                group_cnv_type = 'Negative'
-                        else:
-                            group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
-                                segment_group_data, call_depth_col)
-                            group_cnv_type = group_cnv[group_stability]
+                        group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
+                            segment_group_data, call_depth_col)
+                        group_cnv_type = group_cnv[group_stability]
                         if group_cnv_type == cnv_type:
                             samples_data.loc[segment_group_data.index, 'Region_Index'] = min(segments_group)
                             samples_data.loc[segment_group_data.index, 'Region_Type'] = group_stability
@@ -193,9 +187,11 @@ class FastCBS:
                                 seg_index_min, segment_index_max, inclusive='both')]
                             group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
                                 segment_group_data, call_depth_col)
-                            other_type_mean = sample_gene_data[sample_gene_data['Region_States'] != cnv_type][
-                                call_depth_col].mean()
-                            if (other_type_mean - 1) > 0.8 * (self.region_thr[group_stability][cnv_type] - 1):
+                            other_type_data = segment_group_data[segment_group_data['Region_States'] != cnv_type]
+                            other_type_ratio = other_type_data.shape[0] / segment_group_data.shape[0]
+                            other_type_mean = other_type_data[call_depth_col].mean()
+                            if (abs(other_type_mean - 1) > 0.8 * abs(
+                                    self.region_thr[group_stability][cnv_type] - 1)) or (other_type_ratio < 0.33):
                                 group_cnv_type = group_cnv[group_stability]
                                 if group_cnv_type == cnv_type:
                                     samples_data.loc[segment_group_data.index, 'Region_Index'] = min(segments_group)
@@ -224,31 +220,37 @@ class FastCBS:
                     'Region_Index'].drop_duplicates().values.tolist()
                 if cnv_type_segments:
                     for cnv_type_segment in cnv_type_segments:
+                        flank_merge = [cnv_type_segment]
                         for flank_index in [cnv_type_segment - 1, cnv_type_segment + 1]:
                             flank_negative_data = sample_gene_data[
                                 (sample_gene_data['Region_Index'] == flank_index) &
                                 (sample_gene_data['Region_States'] == 'Negative')]
-                            if not flank_negative_data.empty:
+                            flank_negative_amps = flank_negative_data.shape[0]
+                            if flank_negative_amps > 1:
                                 flank_ratio = flank_negative_data['Region_Ratio'].values[0]
                                 flank_stability = flank_negative_data['Region_Type'].values[0]
-                                if (flank_ratio - 1) > 0.8 * (self.region_thr[flank_stability][cnv_type] - 1):
-                                    merge_data = sample_gene_data[sample_gene_data['Region_Index'].isin(
-                                        [cnv_type_segment, flank_index])]
-                                    group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
-                                        merge_data, call_depth_col)
-                                    group_cnv_type = group_cnv[group_stability]
-                                    if group_cnv_type == cnv_type:
-                                        samples_data.loc[merge_data.index, 'Region_Index'] = cnv_type_segment
-                                        samples_data.loc[merge_data.index, 'Region_Type'] = group_stability
-                                        samples_data.loc[merge_data.index, 'Region_Ratio'] = group_ratio
-                                        samples_data.loc[merge_data.index, 'Region_Ratio_Std'] = group_ratio_std
-                                        samples_data.loc[merge_data.index, 'Stable_Region_States'] = group_cnv[
-                                            'Stable']
-                                        samples_data.loc[merge_data.index, 'Unstable_Region_States'] = group_cnv[
-                                            'Unstable']
-                                        samples_data.loc[merge_data.index, 'Region_States'] = group_cnv_type
-                                        sample_gene_data = samples_data[(samples_data['Sample_Name'] == sample_gene[0]) &
-                                                                       (samples_data['Gene'] == sample_gene[1])]
+                                flank_cnv_amps = flank_negative_data[flank_negative_data['Amp_States'] == cnv_type].shape[0]
+                                flank_amp_ratio = flank_cnv_amps / flank_negative_amps
+                                if (abs(flank_ratio - 1) > 0.8 * abs(
+                                        self.region_thr[flank_stability][cnv_type] - 1)) and (flank_amp_ratio > 0.5):
+                                    flank_merge.append(flank_index)
+                        if len(flank_merge) > 1:
+                            merge_data = sample_gene_data[sample_gene_data['Region_Index'].isin(flank_merge)]
+                            group_cnv, group_stability, group_type_amp_ratio, group_ratio, group_ratio_std = self.segment_cnv_check(
+                                merge_data, call_depth_col)
+                            group_cnv_type = group_cnv[group_stability]
+                            if group_cnv_type == cnv_type:
+                                samples_data.loc[merge_data.index, 'Region_Index'] = cnv_type_segment
+                                samples_data.loc[merge_data.index, 'Region_Type'] = group_stability
+                                samples_data.loc[merge_data.index, 'Region_Ratio'] = group_ratio
+                                samples_data.loc[merge_data.index, 'Region_Ratio_Std'] = group_ratio_std
+                                samples_data.loc[merge_data.index, 'Stable_Region_States'] = group_cnv[
+                                    'Stable']
+                                samples_data.loc[merge_data.index, 'Unstable_Region_States'] = group_cnv[
+                                    'Unstable']
+                                samples_data.loc[merge_data.index, 'Region_States'] = group_cnv_type
+                                sample_gene_data = samples_data[(samples_data['Sample_Name'] == sample_gene[0]) &
+                                                               (samples_data['Gene'] == sample_gene[1])]
 
             keep_segments = sorted(
                 samples_data.loc[sample_gene_data.index]['Region_Index'].drop_duplicates().values.tolist())
@@ -282,15 +284,18 @@ class FastCBS:
                             else:
                                 exon_region_str = str(min_exon_num) + '-' + str(max_exon_num)
                             cnv_exon_count = max_exon_num - min_exon_num + 1
+
                             if self.call_mode == 'Germline':
                                 cnv_region_str = sample_gene[1] + '_E' + exon_region_str
                                 next_exon_order = segment_data['Exon_Order'].max() + 1
                                 prev_exon_order = segment_data['Exon_Order'].min() - 1
-                                region_adjacent_data = sample_gene_data.loc[
-                                    sample_gene_data['Exon_Order'].between(prev_exon_order, next_exon_order,
-                                                                           inclusive='both') & ~sample_gene_data.index.isin(
-                                        segment_data.index)]
+                                region_adjacent_data = sample_gene_data.loc[sample_gene_data['Exon_Order'].between(
+                                    prev_exon_order, next_exon_order, inclusive='both') & ~sample_gene_data.index.isin(
+                                    segment_data.index)]
                                 samples_data.loc[segment_data.index, 'Region_Exon_Count'] = cnv_exon_count
+                                cnv_exon_amp_count = sample_gene_data[sample_gene_data['Exon_Order'].between(
+                                    prev_exon_order + 1, next_exon_order - 1, inclusive='both')].shape[0]
+                                samples_data.loc[segment_data.index, 'Region_Exon_Amp_Count'] = cnv_exon_amp_count
                             else:
                                 cnv_region_str = sample_gene[1]
                                 region_adjacent_data = pd.DataFrame()
@@ -350,6 +355,7 @@ class FastCBS:
 
     @staticmethod
     def outlier_smooth(input_data, window_size=3):
+
         smooth_data = input_data.copy()
         data_std = input_data.std()
         replace_value = dict()
@@ -381,26 +387,23 @@ class FastCBS:
         else:
             return calc_data.values[0], 0.001
 
-    def rec_segment(self, cbs_data, start, end, depth_segments=None, sample_gene=''):
+    def rec_cbs(self, cbs_data, start, end, depth_segments=None, sample_gene=''):
         if depth_segments is None:
             depth_segments = list()
         if end - start < 4:
             depth_segments.append((start, end))
         else:
-            s, e, break_point = self.cbs(cbs_data, start, end, sample_gene)
-            if (not break_point) or (e - s == end - start):
+            break_points = self.cbs_segment(cbs_data, start, end, sample_gene)
+            if not break_points:
                 depth_segments.append((start, end))
             else:
-                if s - 1 >= start:
-                    self.rec_segment(cbs_data, start, s - 1, depth_segments, sample_gene)
-                if e > s:
-                    self.rec_segment(cbs_data, s, e, depth_segments, sample_gene)
-                if e + 1 <= end:
-                    self.rec_segment(cbs_data, e + 1, end, depth_segments, sample_gene)
+                self.rec_cbs(cbs_data, start, break_points[0] - 1, depth_segments, sample_gene)
+                if len(break_points) == 2:
+                    self.rec_cbs(cbs_data, break_points[0], break_points[1] - 1, depth_segments, sample_gene)
+                self.rec_cbs(cbs_data, break_points[-1], end, depth_segments, sample_gene)
         return depth_segments
 
-    # call segment by jump point and t test
-    def cbs(self, cbs_data, start, end, sample_gene=''):
+    def cbs_segment(self, cbs_data, start, end, sample_gene=''):
         select_data = cbs_data.loc[start:end]
         trans_data = select_data.to_frame(name='Values')
         trans_data['Values_Offset'] = trans_data['Values'] - trans_data['Values'].mean()
@@ -413,105 +416,80 @@ class FastCBS:
             lambda x: x.mean(), axis=1)
         trans_data['Offset_Sum_Fix'] = trans_data['Offset_Sum'] - self.diff_fold * trans_data['Offset_Diff_Mean']
 
-        jump_thr_candidates = dict()
-
-        # Find jump upwards breakpoints candidates
         up_candidate_pos = trans_data[(trans_data['Offset_Diff_Min'] > self.jump_thr) |
-                                      (trans_data['Offset_Diff_Max'] > 1.5 * self.jump_thr)].copy()
+                                      (trans_data['Offset_Diff_Max'] > 1.45 * self.jump_thr) |
+                                      (trans_data['Offset_Diff_Mean'] > 1.1 * self.jump_thr)].copy()
+
         if up_candidate_pos.empty:
-            up_candidate_pos = trans_data[(trans_data['Offset_Diff_Max'] > self.jump_thr)].copy()
+            up_candidate_pos = trans_data[(trans_data['Offset_Diff_Max'] > self.jump_thr) |
+                                          (trans_data['Offset_Diff_Mean'] > 0.8 * self.jump_thr)].copy()
             up_candidate_pos['Up_Score'] = 1
         else:
             up_candidate_pos['Up_Score'] = 2
-        if up_candidate_pos.empty:
-            jump_thr_candidates['Up'] = dict()
-        else:
+        if not up_candidate_pos.empty:
             up_candidate_pos_index = up_candidate_pos['Offset_Sum_Fix'].nsmallest(
                 self.extreme_point_num).index.tolist()
-            jump_thr_candidates['Up'] = up_candidate_pos.loc[up_candidate_pos_index]['Up_Score'].to_dict()
+            up_expanded_index = np.unique(np.clip(np.concatenate([
+                    np.arange(i - 2, i + 2 + 1) for i in up_candidate_pos_index]), start, end))
+            expand_up_candidate_pos_index = up_candidate_pos[
+                up_candidate_pos.index.isin(up_expanded_index)].index.tolist()
+
+            jump_thr_candidates = up_candidate_pos.loc[expand_up_candidate_pos_index]['Up_Score'].to_dict()
+        else:
+            jump_thr_candidates = dict()
 
         # Find jump downwards breakpoints candidates
         down_candidate_pos = trans_data[(trans_data['Offset_Diff_Min'] < -1 * self.jump_thr) |
-                                        (trans_data['Offset_Diff_Max'] < -1.5 * self.jump_thr)].copy()
+                                        (trans_data['Offset_Diff_Max'] < -1.45 * self.jump_thr) |
+                                        (trans_data['Offset_Diff_Mean'] < -1.1 * self.jump_thr)].copy()
         if down_candidate_pos.empty:
-            down_candidate_pos = trans_data[(trans_data['Offset_Diff_Max'] < -1 * self.jump_thr)].copy()
+            down_candidate_pos = trans_data[(trans_data['Offset_Diff_Max'] < -1 * self.jump_thr) |
+                                            (trans_data['Offset_Diff_Mean'] < -0.8 * self.jump_thr)].copy()
             down_candidate_pos['Down_Score'] = 1
         else:
             down_candidate_pos['Down_Score'] = 2
-        if down_candidate_pos.empty:
-            jump_thr_candidates['Down'] = dict()
-        else:
-            down_candidate_po_index = down_candidate_pos['Offset_Sum_Fix'].nlargest(
+        if not down_candidate_pos.empty:
+            down_candidate_pos_index = down_candidate_pos['Offset_Sum_Fix'].nlargest(
                 self.extreme_point_num).index.tolist()
-            jump_thr_candidates['Down'] = down_candidate_pos.loc[down_candidate_po_index]['Down_Score'].to_dict()
+            down_expanded_index = np.unique(np.clip(np.concatenate([
+                    np.arange(i - 2, i + 2 + 1) for i in down_candidate_pos_index]), start, end))
+            expand_down_candidate_pos_index = down_candidate_pos[
+                down_candidate_pos.index.isin(down_expanded_index)].index.tolist()
 
-        pair_type = {'Up': 'Down', 'Down': 'Up'}
-        breakpoint_candidates = list()
-        for break_type in jump_thr_candidates:
-            if jump_thr_candidates[break_type]:
-                for break_end in jump_thr_candidates[break_type]:
-                    break_score = jump_thr_candidates[break_type][break_end]
-                    if jump_thr_candidates[pair_type[break_type]]:
-                        for pair_end in jump_thr_candidates[pair_type[break_type]]:
-                            pair_score = jump_thr_candidates[pair_type[break_type]][pair_end]
-                            break_pair_score = break_score + pair_score
-                            if break_pair_score > 2:
-                                jump_bp_s, jump_bp_end = min(break_end, pair_end), max(break_end, pair_end)
-                                if (jump_bp_s, jump_bp_end) not in breakpoint_candidates:
-                                    breakpoint_candidates.append((jump_bp_s, jump_bp_end))
-                                if (jump_bp_s - start < 2) and (
-                                        (start, jump_bp_end) not in breakpoint_candidates):
-                                    breakpoint_candidates.append((start, jump_bp_end))
-                                if (end - jump_bp_end) < 2 and ((jump_bp_s, end) not in breakpoint_candidates):
-                                    breakpoint_candidates.append((jump_bp_s, end))
-                    else:
-                        if abs(select_data.loc[start:break_end].mean() - 1) > abs(
-                                select_data.loc[break_end:end].mean() - 1):
-                            breakpoint_candidates.append((start, break_end))
-                        else:
-                            breakpoint_candidates.append((break_end, end))
+            jump_thr_candidates.update(down_candidate_pos.loc[expand_down_candidate_pos_index]['Down_Score'].to_dict())
 
-        if breakpoint_candidates:
+        if jump_thr_candidates:
             breakpoint_p = dict()
-            for breakpoint_candidate in breakpoint_candidates:
-                candidate_bp_s, candidate_bp_e = breakpoint_candidate
-                if candidate_bp_e != end:
-                    candidate_bp_e -= 1
-                xt = trans_data['Values_Offset'].loc[candidate_bp_s:candidate_bp_e]
-                xn = trans_data['Values_Offset'].drop(xt.index)
-                if (len(xt) > 1) and (len(xn) > 1):
-                    test_stat, test_p = self.t_test(xt, xn)
-                    breakpoint_p[(candidate_bp_s, candidate_bp_e)] = test_p
-            if breakpoint_p:
-                best_p = min(breakpoint_p.values())
-                best_bp_s, best_bp_e = min(breakpoint_p, key=breakpoint_p.get)
-                if best_p < self.seg_p_thr:
-                    statistics_check = True
-                else:
-                    statistics_check = False
-                return best_bp_s, best_bp_e, statistics_check
-            else:
-                return start, end, False
-        else:
-            return start, end, False
+            # breakpoint_var = dict()
+            candidate_bps = sorted(jump_thr_candidates.keys())
+            candidate_groups = list(itertools.combinations(candidate_bps, 1))
+            candidate_groups.extend(list(itertools.combinations(candidate_bps, 2)))
+            for bp_group in candidate_groups:
+                group_score = 0
+                for bp in bp_group:
+                    group_score += jump_thr_candidates[bp]
+                if (group_score > len(bp_group)) and (bp_group[0] - start >= 2) and (end - bp_group[-1] >= 2):
+                    if len(bp_group) == 2:
+                        xt = trans_data['Values'].loc[bp_group[0]:bp_group[1] - 1]
+                        xn = trans_data['Values'].drop(xt.index)
+                    else:
+                        xt = trans_data['Values'].loc[start:bp_group[0] - 1]
+                        xn = trans_data['Values'].loc[bp_group[0]:end]
+                    if (len(xt) > 1) and (len(xn) > 1):
+                        test_stat, test_p = mannwhitneyu(xt, xn)
+                        breakpoint_p[bp_group] = test_p
 
-    # Calculate the variance of the segment
-    @staticmethod
-    def t_test(a_data, b_data, sd_thr=0.05):
-        if len(a_data) > 1 and len(b_data) > 1:
-            equal_val_stat, equal_val_p = levene(a_data, b_data)
-            if equal_val_p < sd_thr:
-                equal_val_bool = False
+            if breakpoint_p:
+                best_bp_group = min(breakpoint_p, key=breakpoint_p.get)
+                best_p = breakpoint_p[best_bp_group]
+                if best_p < self.seg_p_thr:
+                    return best_bp_group
+                else:
+                    return ()
             else:
-                equal_val_bool = True
-            ttest_stat, ttest_p = ttest_ind(a_data, b_data, equal_var=equal_val_bool)
-        elif len(a_data) == 1 and len(b_data) > 1:
-            ttest_stat, ttest_p = ttest_1samp(b_data, a_data.values[0])
-        elif len(a_data) > 1 and len(a_data) == 1:
-            ttest_stat, ttest_p = ttest_1samp(a_data, b_data.values[0])
+                return ()
         else:
-            ttest_stat, ttest_p = np.nan, np.nan
-        return ttest_stat, ttest_p
+            return ()
 
     # Determine the CNV state of the segment based on the average probe depth and threshold
     def segment_cnv_check(self, segment_data, call_depth_col):
@@ -540,73 +518,79 @@ class FastCBS:
             stability_cnv_type[stability_type] = cnv_type
         return stability_cnv_type, region_stability, type_amp_ratio, segment_region_ratio, segment_region_ratio_std
 
-    # Merge the adjacent segments with the same CNV state
-    def cpf_merge(self, depth_data, depth_segments, sample_gene):
+    def segment_merge(self, depth_data, depth_segments, sample_gene):
         if len(depth_segments) > 3:
             start_index = depth_data.first_valid_index()
             end_index = depth_data.last_valid_index()
             data_len = len(depth_data)
             bp_ends = [bp[1] for bp in depth_segments[:-1]]
+            bp_ends = sorted(set(filter(lambda x: start_index < x < end_index, bp_ends)))
             bp_pair_var = {}
-            best_var = self.cpf_var(depth_data) / data_len + self.cpf_weight
-            best_var_group = []
-            best_p = 1
-            best_p_var = 100
-            best_p_group = []
             cycle_pass = 2
-            max_bp = min(self.break_point_num + 2, len(bp_ends) + 1)
-            for r in range(1, max_bp):
-                if cycle_pass:
-                    cycle_pass -= 1
-                    cycle_groups = list(itertools.combinations(bp_ends, r))
-                    for bp_group in cycle_groups:
-                        bp_group = list(bp_group)
-                        bp_group.insert(0, start_index - 1)
-                        bp_group.append(end_index)
-                        cpf_var = 0
-                        for index, bp in enumerate(bp_group[: -1]):
-                            if (bp + 1, bp_group[index + 1]) not in bp_pair_var:
-                                bp_pair_var[(bp + 1, bp_group[index + 1])] = self.cpf_var(
-                                    depth_data.loc[bp + 1:bp_group[index + 1]])
-                            cpf_var += bp_pair_var[(bp + 1, bp_group[index + 1])]
-                        cpf_var = cpf_var / data_len + (r + 1) * self.cpf_weight
-
-                        if len(bp_group) in [3, 4] and (bp_group[2] - bp_group[1] < 10):
-                            xt = depth_data.loc[bp_group[1] + 1:bp_group[2]]
-                            xn = depth_data.drop(xt.index)
+            select_bps = (start_index - 1, end_index)
+            while cycle_pass:
+                group_var = dict()
+                group_test_p = dict()
+                candidate_bps = [item for item in bp_ends if item not in select_bps]
+                candidate_groups = list(itertools.combinations(candidate_bps, 1))
+                two_candidate_groups = list(itertools.combinations(candidate_bps, 2))
+                two_candidate_groups = [item for item in two_candidate_groups if not list(filter(
+                    lambda x: item[0]< x < item[1], select_bps))]
+                candidate_groups.extend(two_candidate_groups)
+                for bp_group in candidate_groups:
+                    right_end_bps = list(filter(lambda x: x > max(bp_group), select_bps))
+                    left_end_bps = list(filter(lambda x: x < min(bp_group), select_bps))
+                    if left_end_bps and right_end_bps:
+                        right_end = min(right_end_bps)
+                        left_end = max(left_end_bps)
+                        if right_end - left_end >= 4:
+                            if len(bp_group) == 1:
+                                bp = bp_group[0]
+                                xt = depth_data.loc[left_end + 1:bp]
+                                xn = depth_data.loc[bp + 1:right_end]
+                            else:
+                                xt = depth_data.loc[bp_group[0] + 1:bp_group[1]]
+                                xf = depth_data.loc[left_end + 1:right_end]
+                                xn = xf.drop(xt.index)
                             if (len(xt) > 1) and (len(xn) > 1):
-                                test_stat, test_p = self.t_test(xt, xn)
-                                if test_p < best_p and (test_p < self.seg_p_thr) and (cpf_var < best_p_var):
-                                    best_p = test_p
-                                    best_p_var = cpf_var
-                                    best_p_group = bp_group
-                        if cpf_var < best_var:
-                            cycle_pass = 2
-                            best_var = cpf_var
-                            best_var_group = bp_group
-            if best_var_group:
-                merge_depth_segments = [(best_var_group[i] + 1, best_var_group[i + 1]) for i in
-                                        range(len(best_var_group) - 1)]
+                                test_stat, test_p = mannwhitneyu(xt, xn)
+                                bp_group += select_bps
+                                bp_group = tuple(sorted(bp_group))
+                                # print(bp_group)
+                                bp_group_var = 0
+                                for index, bp in enumerate(bp_group[: -1]):
+                                    if (bp + 1, bp_group[index + 1]) not in bp_pair_var:
+                                        bp_pair_var[(bp + 1, bp_group[index + 1])] = self.cpf_var(
+                                            depth_data.loc[bp + 1:bp_group[index + 1]])
+                                    bp_group_var += bp_pair_var[(bp + 1, bp_group[index + 1])]
+                                group_var[bp_group] = bp_group_var / data_len
+                                group_test_p[bp_group] = test_p
+                cycle_pass = 0
+                if group_var:
+                    best_group = min(group_var, key=group_var.get)
+                    best_group_p = group_test_p[best_group]
+                    if best_group_p < self.seg_p_thr:
+                        select_bps = best_group
+                        cycle_pass = 2
+            if cycle_pass:
+                merge_depth_segments = [(select_bps[i] + 1, select_bps[i + 1]) for i in
+                                        range(len(select_bps) - 1)]
             else:
-                if best_p_group:
-                    merge_depth_segments = [(best_p_group[i] + 1, best_p_group[i + 1]) for i in
-                                            range(len(best_p_group) - 1)]
-                else:
-                    merge_depth_segments = [(start_index, end_index)]
+                merge_depth_segments = depth_segments
         else:
             merge_depth_segments = depth_segments
         return merge_depth_segments
 
-    # Calculate the sum of the square of the deviation of the data
     @staticmethod
     def cpf_var(input_data):
         mean = input_data.mean()
         return input_data.sub(mean).pow(2).sum()
-        # return input_data.pow(2).sum() / len(input_data)
 
 
-# Split the list of integers into continuous groups
 def int_continuous_split(int_list, max_gap_value):
+    """ Check number order Continuity
+    """
+
     num_groups = list()
     pre_num = int_list[0]
     num_sequence_list = [pre_num]
@@ -621,7 +605,6 @@ def int_continuous_split(int_list, max_gap_value):
     return num_groups
 
 
-# Find the minimum and maximum values in the list
 def diff_extremal(row):
     if row.isnull().values.any():
         return [np.nan, np.nan]
@@ -639,7 +622,7 @@ if __name__ == '__main__':
     pos_data = pd.read_csv('./amplicon_depth_read_data.tsv', sep='\t', low_memory=False)
     t1 = time.time()
     call_col = 'Ref_Norm_Depth'
-    cbs_data = cbs_call(pos_data, call_col, amp_thr, region_thr, cnv_amps_thr)
+    cbs_data = FastCBS(pos_data, call_col, amp_thr, region_thr).run()
     t2 = time.time()
     cost_time = t2 - t1
     print('Run time: {}s'.format(cost_time))
